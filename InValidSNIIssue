@@ -1,0 +1,70 @@
+Description-
+When we moved to Jetty 10, we noticed that unless the domain name in the request matches what is present in the keystore we get this error:
+
+
+HTTP ERROR 400 Invalid SNI
+org.eclipse.jetty.http.BadMessageException: 400: Invalid SNI
+	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:267)
+	at org.eclipse.jetty.server.SecureRequestCustomizer.customize(SecureRequestCustomizer.java:208)
+	at org.eclipse.jetty.server.HttpChannel.lambda$handle$0(HttpChannel.java:501)
+	at org.eclipse.jetty.server.HttpChannel.dispatch(HttpChannel.java:762)
+	at org.eclipse.jetty.server.HttpChannel.handle(HttpChannel.java:497)
+	at org.eclipse.jetty.server.HttpConnection.onFillable(HttpConnection.java:282)
+	at org.eclipse.jetty.io.AbstractConnection$ReadCallback.succeeded(AbstractConnection.java:314)
+	at org.eclipse.jetty.io.FillInterest.fillable(FillInterest.java:100)
+	at org.eclipse.jetty.io.ssl.SslConnection$DecryptedEndPoint.onFillable(SslConnection.java:558)
+	at org.eclipse.jetty.io.ssl.SslConnection.onFillable(SslConnection.java:379)
+	at org.eclipse.jetty.io.ssl.SslConnection$2.succeeded(SslConnection.java:146)
+	at org.eclipse.jetty.io.FillInterest.fillable(FillInterest.java:100)
+	at org.eclipse.jetty.io.SelectableChannelEndPoint$1.run(SelectableChannelEndPoint.java:53)
+	at org.eclipse.jetty.util.thread.strategy.AdaptiveExecutionStrategy.runTask(AdaptiveExecutionStrategy.java:416)
+	at org.eclipse.jetty.util.thread.strategy.AdaptiveExecutionStrategy.consumeTask(AdaptiveExecutionStrategy.java:385)
+	at org.eclipse.jetty.util.thread.strategy.AdaptiveExecutionStrategy.tryProduce(AdaptiveExecutionStrategy.java:272)
+	at org.eclipse.jetty.util.thread.strategy.AdaptiveExecutionStrategy.lambda$new$0(AdaptiveExecutionStrategy.java:140)
+	at org.eclipse.jetty.util.thread.ReservedThreadExecutor$ReservedThread.run(ReservedThreadExecutor.java:411)
+	at org.eclipse.jetty.util.thread.QueuedThreadPool.runJob(QueuedThreadPool.java:969)
+	at org.eclipse.jetty.util.thread.QueuedThreadPool$Runner.doRunJob(QueuedThreadPool.java:1194)
+	at org.eclipse.jetty.util.thread.QueuedThreadPool$Runner.run(QueuedThreadPool.java:1149)
+	at java.base/java.lang.Thread.run(Thread.java:833)</pre> 
+After doing some further digging into this issue, it appears the issue is only present when not using the fqdn found in the provided keystore.
+
+By default SniHostCheck flag is true in jetty and it throws this error - https://github.com/eclipse/jetty.project/blob/d3aa35511deae8b1d3d27ddef79bb54a38ea8560/jetty-server/src/main/java/org/eclipse/jetty/server/SecureRequestCustomizer.java#L266 when server certificate name and DNS name do not match.
+Jetty does not provide any way to disable SNI host check with some configurations. There is already raised issue in spring-boot github repo to fix it - https://github.com/spring-projects/spring-boot/issues/36271.
+
+To unblock us from local testing, I have disabled this check with JettyServerCustomizer with below implementation-
+
+import com.salesforce.pra.ui.logging.PraUiLogger;
+import org.eclipse.jetty.server.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.web.embedded.jetty.JettyServerCustomizer;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class JettyConfiguration {
+
+    @Autowired
+    PraUiLogger praUiLogger;
+
+    @Bean
+    @ConditionalOnProperty(name="isLocalDevelopmentTesting", havingValue="true")
+    public JettyServerCustomizer customizer() {
+        praUiLogger.info("Customizing jetty configuration to disable sni host check for local testing");
+        return server -> {
+            for (Connector connector : server.getConnectors()) {
+                if (connector instanceof ServerConnector) {
+                    HttpConnectionFactory connectionFactory = ((ServerConnector) connector).getConnectionFactory(HttpConnectionFactory.class);
+                    if (connectionFactory != null) {
+                        HttpConfiguration httpConfig = connectionFactory.getHttpConfiguration();
+                        // Disable SNI host check
+                        SecureRequestCustomizer secureRequestCustomizer = httpConfig.getCustomizer(SecureRequestCustomizer.class);
+                        if (secureRequestCustomizer != null) {
+                            secureRequestCustomizer.setSniHostCheck(false);
+                        }
+                    }
+                }
+            }
+        };
+    }
+}
